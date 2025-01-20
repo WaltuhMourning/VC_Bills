@@ -18,13 +18,7 @@ def load_data():
     df = pd.read_excel(FILE_NAME, sheet_name=SHEET_NAME, engine='openpyxl')
 
     # Clean and structure the data
-    df = df[[
-        "Author(s)",
-        "Original Introduction Date:",
-        "Main policy topic",
-        "Current Link (Inc. Amndt, if applicable)",
-        "Method of Enactment",
-    ]]
+    df = df[["Author(s)", "Original Introduction Date:", "Main policy topic", "Current Link (Inc. Amndt, if applicable)", "Method of Enactment"]]
     df.columns = ["Authors", "Date", "Policy Area", "Title and Link", "Enactment Method"]
 
     # Convert Date column to datetime explicitly
@@ -58,7 +52,6 @@ def load_data():
 def get_filtered_data():
     data = load_data()
     if data is not None:
-        # Ensure no rows are dropped prematurely
         data = data.dropna(subset=["Date"]).reset_index(drop=True)
         return data
     return None
@@ -67,96 +60,129 @@ def get_filtered_data():
 def main():
     data = get_filtered_data()
 
-    if data is not None:
-        # Sidebar filters
-        st.sidebar.header("Filters")
+    if data is None:
+        st.error("No data available to display.")
+        return
 
-        # Buttons to select/deselect all authors and policy areas
-        if st.sidebar.button("Select All Authors"):
-            selected_authors = list(data["Author"].unique())
-        elif st.sidebar.button("Deselect All Authors"):
-            selected_authors = []
-        else:
-            selected_authors = ["Kyuoku Chan", "Norman Nord"]
+    st.title("Enacted Federal Legislation Tracker")
 
-        if st.sidebar.button("Select All Policy Areas"):
-            selected_policies = list(data["Policy Area"].unique())
-        elif st.sidebar.button("Deselect All Policy Areas"):
-            selected_policies = []
-        else:
-            selected_policies = data["Policy Area"].unique()
+    # Initial selection screen
+    search_option = st.radio(
+        "How would you like to search for bills?",
+        ["Author", "Method of Enactment", "Policy Area", "Date Range"],
+        index=0
+    )
 
-        # Date range slider with all available dates
-        min_date = data["Date"].min().date()
-        max_date = data["Date"].max().date()
+    # Initialize default filters
+    authors = data["Author"].unique()
+    policy_areas = data["Policy Area"].unique()
+    methods = data["Enactment Method"].unique()
+    min_date = data["Date"].min().date()
+    max_date = data["Date"].max().date()
 
-        if pd.isnull(min_date) or pd.isnull(max_date):
-            st.error("No valid dates available in the data.")
-            return
+    if search_option == "Author":
+        author_filter = st.multiselect("Select Authors", options=authors, default=[])
+        policy_filter = policy_areas
+        enactment_filter = methods
+        date_range = (min_date, max_date)
+    elif search_option == "Method of Enactment":
+        author_filter = authors
+        policy_filter = policy_areas
+        enactment_filter = st.multiselect("Select Methods of Enactment", options=methods, default=[])
+        date_range = (min_date, max_date)
+    elif search_option == "Policy Area":
+        author_filter = authors
+        policy_filter = st.multiselect("Select Policy Areas", options=policy_areas, default=[])
+        enactment_filter = methods
+        date_range = (min_date, max_date)
+    elif search_option == "Date Range":
+        author_filter = authors
+        policy_filter = policy_areas
+        enactment_filter = methods
+        date_range = st.slider("Select Date Range", min_value=min_date, max_value=max_date, value=(min_date, max_date))
 
-        # Set default date range to include the entire range
-        date_range = st.sidebar.slider("Select Date Range", min_value=min_date, max_value=max_date, value=(min_date, max_date))
+    # Apply filters
+    filtered_data = data[
+        (data["Author"].isin(author_filter) if len(author_filter) > 0 else True) &
+        (data["Policy Area"].isin(policy_filter) if len(policy_filter) > 0 else True) &
+        (data["Enactment Method"].isin(enactment_filter) if len(enactment_filter) > 0 else True) &
+        (data["Date"] >= pd.to_datetime(date_range[0])) & (data["Date"] <= pd.to_datetime(date_range[1]))
+    ]
 
-        author_filter = st.sidebar.multiselect("Filter by Author", options=data["Author"].unique(), default=selected_authors)
-        policy_filter = st.sidebar.multiselect("Filter by Policy Area", options=data["Policy Area"].unique(), default=selected_policies)
-        enactment_filter = st.sidebar.multiselect("Filter by Enactment Method", options=data["Enactment Method"].unique(), default=data["Enactment Method"].unique())
+    # Simple visualization in basic mode
+    st.subheader("Filtered Results")
+    st.write(filtered_data.drop(columns="Title and Link"))
 
+    fig = px.scatter(
+        filtered_data,
+        x="Policy Area",
+        y="Date",
+        size=[10] * len(filtered_data),  # Fixed size for orbs
+        color="Author",
+        hover_name="Title",
+        hover_data={"Date": True, "Link": False},
+        labels={"Policy Area": "Policy Area", "Date": "Date Introduced"},
+        title="Simple Visualization",
+    )
+
+    # Add clickable functionality to orbs
+    for i, row in filtered_data.iterrows():
+        if pd.notna(row["Link"]):
+            fig.add_annotation(
+                x=row["Policy Area"],
+                y=row["Date"],
+                text=f'<a href="{row["Link"]}" target="_blank">{row["Title"]}</a>',
+                showarrow=False,
+                font=dict(color="blue"),
+            )
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    # Advanced mode
+    if st.button("Switch to Advanced Mode"):
+        st.sidebar.header("Advanced Filters")
+
+        advanced_author_filter = st.sidebar.multiselect("Filter by Author", options=authors, default=author_filter)
+        advanced_policy_filter = st.sidebar.multiselect("Filter by Policy Area", options=policy_areas, default=policy_filter)
+        advanced_enactment_filter = st.sidebar.multiselect("Filter by Enactment Method", options=methods, default=enactment_filter)
+        advanced_date_range = st.sidebar.slider("Select Date Range", min_value=min_date, max_value=max_date, value=date_range)
+
+        text_size = st.sidebar.slider("Text Size", min_value=10, max_value=30, value=12, step=1)
+
+        advanced_filtered_data = data[
+            (data["Author"].isin(advanced_author_filter)) &
+            (data["Policy Area"].isin(advanced_policy_filter)) &
+            (data["Enactment Method"].isin(advanced_enactment_filter)) &
+            (data["Date"] >= pd.to_datetime(advanced_date_range[0])) & (data["Date"] <= pd.to_datetime(advanced_date_range[1]))
+        ]
+
+        # Visualization
         x_axis = st.sidebar.selectbox("X-Axis", ["Policy Area", "Date", "Author"], index=0)
         y_axis = st.sidebar.selectbox("Y-Axis", ["Policy Area", "Date", "Author"], index=1)
         color = st.sidebar.selectbox("Color", ["Policy Area", "Date", "Author"], index=2)
 
-        # Add sliders for orb and text size
-        orb_size = st.sidebar.slider("Orb Size", min_value=5, max_value=50, value=10, step=1)
-        text_size = st.sidebar.slider("Text Size", min_value=10, max_value=30, value=12, step=1)
+        st.title("Advanced Visualization")
 
-        # Apply filters
-        filtered_data = data[
-            (data["Author"].isin(author_filter)) &
-            (data["Policy Area"].isin(policy_filter)) &
-            (data["Enactment Method"].isin(enactment_filter)) &
-            (data["Date"] >= pd.to_datetime(date_range[0])) & (data["Date"] <= pd.to_datetime(date_range[1]))
-        ]
-
-        # Visualization
-        st.title("Enacted Federal Legislation Tracker")
-
-        # Create interactive scatter plot with full-screen default
         fig = px.scatter(
-            filtered_data,
+            advanced_filtered_data,
             x=x_axis,
             y=y_axis,
-            size=[orb_size] * len(filtered_data),
+            size=[10] * len(advanced_filtered_data),
             color=color,
             hover_name="Title",
             hover_data={"Date": True, "Link": False},
             labels={"Policy Area": "Policy Area", "Date": "Date Introduced"},
-            title="Federal Legislation by Policy Area",
+            title="Advanced Visualization",
         )
 
         fig.update_layout(
             autosize=True,
             height=800,
-            font=dict(size=text_size),  # Adjust text size
+            font=dict(size=text_size),
         )
-
-        # Add clickable functionality
-        for i, row in filtered_data.iterrows():
-            if pd.notna(row["Link"]):
-                fig.add_annotation(
-                    x=row[x_axis],
-                    y=row[y_axis],
-                    text=f'<a href="{row["Link"]}" target="_blank">{row["Title"]}</a>',
-                    showarrow=False,
-                    font=dict(color="blue", size=text_size),
-                )
 
         st.plotly_chart(fig, use_container_width=True)
 
-        # Display filtered data
-        st.subheader("Filtered Legislation")
-        st.write(filtered_data.drop(columns="Title and Link"))
-    else:
-        st.error("No data available to display.")
-
 if __name__ == "__main__":
     main()
+
