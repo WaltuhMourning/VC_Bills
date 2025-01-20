@@ -80,63 +80,59 @@ def main():
     min_date = data["Date"].min().date()
     max_date = data["Date"].max().date()
 
+    author_filter = []
+    policy_filter = []
+    enactment_filter = []
+    date_range = (min_date, max_date)
+
     if search_option == "Author":
         author_filter = st.multiselect("Select Authors", options=authors, default=[])
-        policy_filter = policy_areas
-        enactment_filter = methods
-        date_range = (min_date, max_date)
     elif search_option == "Method of Enactment":
-        author_filter = authors
-        policy_filter = policy_areas
         enactment_filter = st.multiselect("Select Methods of Enactment", options=methods, default=[])
-        date_range = (min_date, max_date)
     elif search_option == "Policy Area":
-        author_filter = authors
         policy_filter = st.multiselect("Select Policy Areas", options=policy_areas, default=[])
-        enactment_filter = methods
-        date_range = (min_date, max_date)
     elif search_option == "Date Range":
-        author_filter = authors
-        policy_filter = policy_areas
-        enactment_filter = methods
         date_range = st.slider("Select Date Range", min_value=min_date, max_value=max_date, value=(min_date, max_date))
 
-    # Apply filters
-    filtered_data = data[
-        (data["Author"].isin(author_filter) if len(author_filter) > 0 else True) &
-        (data["Policy Area"].isin(policy_filter) if len(policy_filter) > 0 else True) &
-        (data["Enactment Method"].isin(enactment_filter) if len(enactment_filter) > 0 else True) &
-        (data["Date"] >= pd.to_datetime(date_range[0])) & (data["Date"] <= pd.to_datetime(date_range[1]))
-    ]
+    # Apply filters only if at least one filter is active
+    if any([author_filter, policy_filter, enactment_filter, date_range != (min_date, max_date)]):
+        filtered_data = data[
+            (data["Author"].isin(author_filter) if author_filter else True) &
+            (data["Policy Area"].isin(policy_filter) if policy_filter else True) &
+            (data["Enactment Method"].isin(enactment_filter) if enactment_filter else True) &
+            (data["Date"] >= pd.to_datetime(date_range[0])) & (data["Date"] <= pd.to_datetime(date_range[1]))
+        ]
 
-    # Simple visualization in basic mode
-    st.subheader("Filtered Results")
-    st.write(filtered_data.drop(columns="Title and Link"))
+        # Simple visualization in basic mode
+        st.subheader("Filtered Results")
+        st.write(filtered_data.drop(columns="Title and Link"))
 
-    fig = px.scatter(
-        filtered_data,
-        x="Policy Area",
-        y="Date",
-        size=[10] * len(filtered_data),  # Fixed size for orbs
-        color="Author",
-        hover_name="Title",
-        hover_data={"Date": True, "Link": False},
-        labels={"Policy Area": "Policy Area", "Date": "Date Introduced"},
-        title="Simple Visualization",
-    )
+        fig = px.scatter(
+            filtered_data,
+            x="Policy Area",
+            y="Date",
+            size=[10] * len(filtered_data),  # Fixed size for orbs
+            color="Author",
+            hover_name="Title",
+            hover_data={"Date": True, "Link": False},
+            labels={"Policy Area": "Policy Area", "Date": "Date Introduced"},
+            title="Simple Visualization (Click full screen on top right of figure)",
+        )
 
-    # Add clickable functionality to orbs
-    for i, row in filtered_data.iterrows():
-        if pd.notna(row["Link"]):
-            fig.add_annotation(
-                x=row["Policy Area"],
-                y=row["Date"],
-                text=f'<a href="{row["Link"]}" target="_blank">{row["Title"]}</a>',
-                showarrow=False,
-                font=dict(color="blue"),
-            )
+        # Add clickable functionality to orbs
+        for i, row in filtered_data.iterrows():
+            if pd.notna(row["Link"]):
+                fig.add_annotation(
+                    x=row["Policy Area"],
+                    y=row["Date"],
+                    text=f'<a href="{row["Link"]}" target="_blank">{row["Title"]}</a>',
+                    showarrow=False,
+                    font=dict(color="blue"),
+                )
 
-    st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Please apply at least one filter to display the visualization.")
 
     # Advanced mode
     if st.button("Switch to Advanced Mode"):
