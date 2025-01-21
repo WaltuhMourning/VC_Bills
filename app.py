@@ -8,12 +8,14 @@ from openpyxl import load_workbook
 from pyvis.network import Network
 import tempfile
 import streamlit.components.v1 as components
+import json
 
 # ------------------------------------------
 #         CONSTANTS / FILE REFERENCES
 # ------------------------------------------
 FILE_NAME = "VCR - All Enacted Law & Legislative Tracker.xlsx"
 SHEET_NAME = "Enacted Federal Law (Ex. J.Res."
+DEFAULT_AUTHOR_NAME = "Sullivan"  # Adjust if your data uses a different string
 
 # ==========================================
 #         DATA LOADING & PREP
@@ -167,13 +169,14 @@ def display_results_table(df: pd.DataFrame):
 
 def create_network_graph(data: pd.DataFrame) -> Network:
     """
-    Creates and returns an interactive PyVis force-directed Network graph 
-    where each Author, Policy Area, and Bill Title is a node, with edges 
+    Creates and returns an interactive PyVis force-directed Network graph
+    where each Author, Policy Area, and Bill Title is a node, with edges
     showing relationships (Author -> Bill, Bill -> Policy Area).
+
+    CHANGE: Added the Bill's Date to the node tooltip.
     """
     net = Network(height="700px", width="100%", bgcolor="#222222", font_color="white")
-    # Force Atlas 2 is often more stable visually:
-    net.force_atlas_2based()
+    net.force_atlas_2based()  # More stable
 
     added_nodes = set()
 
@@ -183,11 +186,20 @@ def create_network_graph(data: pd.DataFrame) -> Network:
         policy_area = row["Policy Area"]
         link = row.get("Link", None)
 
+        # We'll convert the date to a short string (YYYY-MM-DD) if available
+        bill_date = row.get("Date", None)
+        if pd.notna(bill_date):
+            date_str = bill_date.strftime("%Y-%m-%d")
+        else:
+            date_str = "N/A"
+
         # Add Bill node
         if bill_title not in added_nodes:
-            tooltip = f"<b>Bill</b>: {bill_title}"
+            # Include the date in the tooltip
+            tooltip = f"<b>Bill</b>: {bill_title}<br>Date: {date_str}"
             if link:
                 tooltip += f"<br><a href='{link}' target='_blank'>Open Link</a>"
+
             net.add_node(bill_title, label=bill_title, title=tooltip, color="#ffa500")
             added_nodes.add(bill_title)
 
@@ -198,7 +210,7 @@ def create_network_graph(data: pd.DataFrame) -> Network:
 
         # Add Policy node
         if policy_area and policy_area not in added_nodes:
-            net.add_node(policy_area, label=policy_area, 
+            net.add_node(policy_area, label=policy_area,
                          title=f"<b>Policy Area</b>: {policy_area}", color="#33a02c")
             added_nodes.add(policy_area)
 
@@ -210,23 +222,56 @@ def create_network_graph(data: pd.DataFrame) -> Network:
 
     return net
 
-def render_network_graph(net: Network):
+def render_network_graph_with_dblclick(net: Network, data: pd.DataFrame):
     """
     Renders the PyVis network graph in Streamlit by generating
     an HTML file and embedding it via an iframe.
-    
-    Uses net.write_html(..., notebook=False) to avoid the 'NoneType' error.
+
+    Injects custom JS so double-clicking a Bill node opens its link in a new tab.
     """
+    # 1) Build node->link map for Bill nodes only
+    node_link_map = {}
+    for idx, row in data.iterrows():
+        bill_title = row["Title"]
+        link = row.get("Link", None)
+        if pd.notna(link) and link:
+            node_link_map[bill_title] = link
+
+    # 2) Generate the HTML in memory
+    net.generate_html()
+
+    # 3) Inject custom <script> to handle double-click
+    custom_js = f"""
+<script>
+var linkMap = {json.dumps(node_link_map)};
+function openLinkOnDoubleClick(params) {{
+    if (params.nodes.length > 0) {{
+        var nodeId = params.nodes[0];
+        if (linkMap[nodeId]) {{
+            window.open(linkMap[nodeId], '_blank');
+        }}
+    }}
+}}
+document.addEventListener('DOMContentLoaded', function() {{
+    if (typeof network !== 'undefined') {{
+        network.on("doubleClick", openLinkOnDoubleClick);
+    }}
+}});
+</script>
+"""
+    if net.html is not None:
+        net.html = net.html.replace("</body>", custom_js + "</body>")
+
+    # 4) Write final HTML to temp file
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
         temp_path = tmp_file.name
 
-    # NOTE: This is the short-term fix that avoids .show()
-    net.write_html(temp_path, notebook=False, open_browser=False)
+    with open(temp_path, "w", encoding="utf-8") as f:
+        f.write(net.html)
 
-    # Read the HTML into a string and then display via an iframe
+    # 5) Display in an iframe
     with open(temp_path, "r", encoding="utf-8") as f:
         html_content = f.read()
-
     components.html(html_content, height=700, scrolling=True)
 
 def create_sankey_diagram(df: pd.DataFrame):
@@ -235,14 +280,12 @@ def create_sankey_diagram(df: pd.DataFrame):
     It visualizes the flow from Author -> Policy Area -> Enactment Method
     using plotly.graph_objects.
     """
-    # 1) Extract unique authors, policy areas, methods
     authors = sorted(df["Author"].dropna().unique())
     policies = sorted(df["Policy Area"].dropna().unique())
     methods = sorted(df["Enactment Method"].dropna().unique())
 
-    # 2) Build a single 'labels' list and track indices
     labels = list(authors) + list(policies) + list(methods)
-    
+
     author_indices = {a: i for i, a in enumerate(authors)}
     policy_indices = {p: i + len(authors) for i, p in enumerate(policies)}
     method_indices = {
@@ -254,7 +297,6 @@ def create_sankey_diagram(df: pd.DataFrame):
     targets = []
     values = []
 
-    # 3) Create edges from Author -> Policy Area
     for _, row in df.iterrows():
         author = row["Author"]
         policy = row["Policy Area"]
@@ -263,7 +305,6 @@ def create_sankey_diagram(df: pd.DataFrame):
             targets.append(policy_indices[policy])
             values.append(1)
 
-    # 4) Create edges from Policy Area -> Method
     for _, row in df.iterrows():
         policy = row["Policy Area"]
         method = row["Enactment Method"]
@@ -272,25 +313,23 @@ def create_sankey_diagram(df: pd.DataFrame):
             targets.append(method_indices[method])
             values.append(1)
 
-    # 5) Build the Sankey figure using graph_objects with improved styling
     fig = go.Figure(
         data=[
             go.Sankey(
-                arrangement="snap",  # "snap" tends to give a clean layout
+                arrangement="snap",
                 node=dict(
                     pad=20,
                     thickness=20,
                     line=dict(color="#333", width=0.5),
                     label=labels,
-                    color="#666",  
-                    hovertemplate='%{label}<extra></extra>',  
-                    # You can customize node text here if you like.
+                    color="#666",
+                    hovertemplate='%{label}<extra></extra>',
                 ),
                 link=dict(
                     source=sources,
                     target=targets,
                     value=values,
-                    color="rgba(150,150,150,0.4)",  # Semi-transparent grey for links
+                    color="rgba(150,150,150,0.4)",
                     hovertemplate=(
                         'Flow from %{source.label} to %{target.label} '
                         'has a value of %{value}<extra></extra>'
@@ -302,7 +341,7 @@ def create_sankey_diagram(df: pd.DataFrame):
 
     fig.update_layout(
         title_text="Sankey: Author → Policy Area → Method",
-        font=dict(size=14),  # Increase overall font size
+        font=dict(size=14),
         height=600,
         margin=dict(l=50, r=50, t=50, b=50),
     )
@@ -312,13 +351,10 @@ def create_sankey_diagram(df: pd.DataFrame):
 def create_timeline_plot(df: pd.DataFrame):
     """
     Creates a Plotly timeline showing the bills over time.
-    We'll use the 'Date' as a single point. 
-    We can replicate a timeline by setting start_date = Date, end_date = Date+1 day, for example.
+    We replicate a timeline by setting Start = Date and End = Date+1 day.
     """
-    # For a timeline, we typically need 'start' and 'end' columns
     temp_df = df.copy()
     temp_df["Start"] = temp_df["Date"]
-    # Add 1 day as an arbitrary "end" so there's a small bar
     temp_df["End"] = temp_df["Date"] + pd.Timedelta(days=1)
 
     fig = px.timeline(
@@ -330,7 +366,7 @@ def create_timeline_plot(df: pd.DataFrame):
         hover_data=["Policy Area", "Enactment Method", "Link"],
         title="Timeline of Bills (1-Day Window)"
     )
-    fig.update_yaxes(autorange="reversed")  # so earliest item is at top
+    fig.update_yaxes(autorange="reversed")  # earliest item at top
     fig.update_layout(height=700)
     return fig
 
@@ -345,99 +381,117 @@ def main():
         st.title("About this App")
         st.markdown("""
         **Enacted Federal Legislation Tracker**  
-        Version 2.0.  
-        
-        This enhanced app includes:  
-        - **Filters** by Author, Policy, Enactment Method, and Date.  
-        - **Scatter & Bar Charts** with advanced mode.  
+        Version 2.0.
+
+        This enhanced app includes:
+        - **Filters** by Author, Policy, Enactment Method, and Date.
         - **Network Graph** with physics-based layout (PyVis).  
-        - **Sankey Diagram** for flow-based analysis.  
-        - **Timeline** visualization.  
-        
-        *Tip*: Adjust filters to narrow down the data before using heavy visuals!
+          (Double-click Bill nodes to open links!)
+        - **Scatter & Bar Charts** with advanced mode.
+        - **Sankey Diagram** for flow-based analysis.
+        - **Timeline** visualization.
+
+        *Tip*: Adjust filters to narrow down data before using heavier visuals!
         """)
-        # Optional disclaimers or instructions
-        st.info("Make sure your data file is in the same folder.\n\nEnjoy exploring your legislative data!")
+        st.info(
+            "Make sure your data file is in the same folder.\n\n"
+            "Hover over Bill nodes to see their date.\n"
+            "Double-click a Bill node to open its link in a new tab!"
+        )
 
     st.title("Enacted Federal Legislation Tracker")
 
     # 1. Load Data
     data = get_filtered_data()
     if data.empty:
-        st.error("No data available. Please ensure the file is available and correctly formatted.")
+        st.error("No data available. Please ensure the file is present and correctly formatted.")
         return
 
-    # 2. Introduction
-    st.markdown(
-        """
-        This application **helps you explore and visualize** Enacted Federal Legislation records.
-        
-        **Basic steps**:  
-        1. Use the radio buttons below to choose a primary filter approach.  
-        2. Select from the dropdowns/slider to refine results.  
-        3. See the filtered table and basic charts.  
-        4. Expand advanced options for more complex filtering and alternative charts.
+    # 2. "See All" Button for entire dataset
+    show_all = st.button("See all bills (Warning: might take a minute to load)")
+    if show_all:
+        filtered_data = data
+        st.warning("Showing ALL bills. This may be slow if the dataset is large.")
+    else:
+        # -- By default, only show SULLIVAN authorship to start --
+        st.subheader("Search / Filter Options")
 
-        ---
-        """
-    )
-
-    # 3. Basic Filter UI
-    st.subheader("Search / Filter Options")
-    search_option = st.radio(
-        "How would you like to search for bills?",
-        ["Author", "Method of Enactment", "Policy Area", "Date Range"],
-        index=0
-    )
-
-    # Prepare unique filter options
-    authors = sorted(data["Author"].dropna().unique())
-    policy_areas = sorted(data["Policy Area"].dropna().unique())
-    methods = sorted(data["Enactment Method"].dropna().unique())
-    min_date = data["Date"].min().date()
-    max_date = data["Date"].max().date()
-
-    # Default filters
-    author_filter = []
-    policy_filter = []
-    enactment_filter = []
-    date_range = (min_date, max_date)
-
-    # One primary filter approach at a time
-    if search_option == "Author":
-        author_filter = st.multiselect("Select Author(s)", options=authors, default=[])
-    elif search_option == "Method of Enactment":
-        enactment_filter = st.multiselect("Select Method(s) of Enactment", options=methods, default=[])
-    elif search_option == "Policy Area":
-        policy_filter = st.multiselect("Select Policy Area(s)", options=policy_areas, default=[])
-    elif search_option == "Date Range":
-        date_range = st.slider(
-            "Select Date Range",
-            min_value=min_date,
-            max_value=max_date,
-            value=(min_date, max_date)
+        search_option = st.radio(
+            "How would you like to search for bills?",
+            ["Author", "Method of Enactment", "Policy Area", "Date Range"],
+            index=0
         )
 
-    # Apply the chosen filters
-    filtered_data = data[
-        ((data["Author"].isin(author_filter)) | (len(author_filter) == 0)) &
-        ((data["Policy Area"].isin(policy_filter)) | (len(policy_filter) == 0)) &
-        ((data["Enactment Method"].isin(enactment_filter)) | (len(enactment_filter) == 0)) &
-        (data["Date"] >= pd.to_datetime(date_range[0])) &
-        (data["Date"] <= pd.to_datetime(date_range[1]))
-    ]
+        authors = sorted(data["Author"].dropna().unique())
+        policy_areas = sorted(data["Policy Area"].dropna().unique())
+        methods = sorted(data["Enactment Method"].dropna().unique())
+        min_date = data["Date"].min().date()
+        max_date = data["Date"].max().date()
 
-    # 4. Display Filtered Results
+        # If default author exists in dataset, pre-select it
+        default_author = [DEFAULT_AUTHOR_NAME] if DEFAULT_AUTHOR_NAME in authors else []
+
+        author_filter = []
+        policy_filter = []
+        enactment_filter = []
+        date_range = (min_date, max_date)
+
+        if search_option == "Author":
+            author_filter = st.multiselect(
+                "Select Author(s)",
+                options=authors,
+                default=default_author
+            )
+        elif search_option == "Method of Enactment":
+            enactment_filter = st.multiselect("Select Method(s) of Enactment", options=methods, default=[])
+        elif search_option == "Policy Area":
+            policy_filter = st.multiselect("Select Policy Area(s)", options=policy_areas, default=[])
+        elif search_option == "Date Range":
+            date_range = st.slider(
+                "Select Date Range",
+                min_value=min_date,
+                max_value=max_date,
+                value=(min_date, max_date)
+            )
+
+        filtered_data = data[
+            ((data["Author"].isin(author_filter)) | (len(author_filter) == 0)) &
+            ((data["Policy Area"].isin(policy_filter)) | (len(policy_filter) == 0)) &
+            ((data["Enactment Method"].isin(enactment_filter)) | (len(enactment_filter) == 0)) &
+            (data["Date"] >= pd.to_datetime(date_range[0])) &
+            (data["Date"] <= pd.to_datetime(date_range[1]))
+        ]
+
+    # -- PHYSICS GRAPH FIRST --
+    st.subheader("Network Graph (Physics Simulation)")
+    st.markdown(
+        """
+        **Hover over Bill nodes** to see their date.  
+        **Double-click on Bill nodes** to open the link in a new tab!  
+        
+        - **Author** nodes (blue)  
+        - **Bill** nodes (orange)  
+        - **Policy Area** nodes (green)
+
+        Drag them around to see the “springs” in action.
+        """
+    )
+    if not filtered_data.empty:
+        net = create_network_graph(filtered_data)
+        render_network_graph_with_dblclick(net, filtered_data)
+    else:
+        st.info("No data to display in network graph. Adjust your filters or load all bills.")
+
+    # -- FILTERED RESULTS TABLE --
     st.subheader("Filtered Results")
     display_results_table(filtered_data)
 
-    # 5. Basic Scatter Plot
+    # -- BASIC SCATTER PLOT --
     if not filtered_data.empty:
         st.subheader("Basic Visualization")
         st.markdown(
             """
-            **Tip**: Use the Plotly toolbar (top-right corner of the chart) to zoom, pan,
-            or go full screen.  
+            **Tip**: Use the Plotly toolbar (top-right) to zoom, pan, or go full screen.
             **Click** on a legend entry to hide/show certain series.
             """
         )
@@ -450,103 +504,82 @@ def main():
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info("No data to visualize. Please adjust your filters above.")
+        st.info("No data to visualize. Please adjust filters or load all bills.")
 
-    with st.expander("Network Graph (Physics Simulation)"):
-        st.markdown(
-            """
-            **Experience a dynamic, physics-based network**:
-            - **Author** nodes (blue)
-            - **Bill** nodes (orange)
-            - **Policy Area** nodes (green)
-
-            Drag them around to watch the “springs” in action.
-            """
-        )
-        if not filtered_data.empty:
-            net = create_network_graph(filtered_data)
-            render_network_graph(net)
-        else:
-            st.info("No data to display in network graph. Please adjust the filters above.")
-    # 6. Optional Additional Visualization (Bar Chart by Year)
+    # -- BAR CHART BY YEAR (Expander) --
     with st.expander("Show Bar Chart by Year", expanded=False):
-        temp_df = filtered_data.copy()
-        temp_df["Year"] = temp_df["Date"].dt.year
-        year_counts = temp_df.groupby("Year")["Title"].count().reset_index()
-        if not year_counts.empty:
-            st.write("Number of Enacted Items per Year")
-            fig_bar = px.bar(
-                year_counts,
-                x="Year",
-                y="Title",
-                labels={"Title": "Count of Enacted Items"},
-                title="Enacted Items by Year",
-            )
-            st.plotly_chart(fig_bar, use_container_width=True)
+        if not filtered_data.empty:
+            temp_df = filtered_data.copy()
+            temp_df["Year"] = temp_df["Date"].dt.year
+            year_counts = temp_df.groupby("Year")["Title"].count().reset_index()
+            if not year_counts.empty:
+                st.write("Number of Enacted Items per Year")
+                fig_bar = px.bar(
+                    year_counts,
+                    x="Year",
+                    y="Title",
+                    labels={"Title": "Count of Enacted Items"},
+                    title="Enacted Items by Year",
+                )
+                st.plotly_chart(fig_bar, use_container_width=True)
+            else:
+                st.info("No data for bar chart. Adjust your filters.")
         else:
-            st.info("No data for bar chart. Please adjust your filters.")
+            st.info("No data available. Please adjust filters or load all bills.")
 
-    # 7. Advanced Mode
+    # -- ADVANCED MODE --
     with st.expander("Show Advanced Filters and Visualization", expanded=False):
         st.markdown(
             """
             **Advanced Mode**:
             - Combine multiple filters at once (e.g., multiple authors **AND** multiple policy areas).
-            - Choose which columns go on the X-axis, Y-axis, or color dimension.
+            - Choose columns for X-axis, Y-axis, and color dimension.
             - Adjust font sizes and toggle clickable labels for each orb.
             """
         )
+        if show_all:
+            st.info("You are currently viewing ALL bills. Advanced filtering won't reduce data.")
+            adv_data = filtered_data
+        else:
+            # Let user choose advanced filters if not showing all
+            authors = sorted(data["Author"].dropna().unique())
+            policy_areas = sorted(data["Policy Area"].dropna().unique())
+            methods = sorted(data["Enactment Method"].dropna().unique())
+            min_date = data["Date"].min().date()
+            max_date = data["Date"].max().date()
 
-        # Advanced Filters
-        advanced_author_filter = st.multiselect(
-            "Filter by Author",
-            options=authors,
-            default=author_filter
-        )
-        advanced_policy_filter = st.multiselect(
-            "Filter by Policy Area",
-            options=policy_areas,
-            default=policy_filter
-        )
-        advanced_enactment_filter = st.multiselect(
-            "Filter by Enactment Method",
-            options=methods,
-            default=enactment_filter
-        )
-        advanced_date_range = st.slider(
-            "Select Date Range",
-            min_value=min_date,
-            max_value=max_date,
-            value=date_range
-        )
+            advanced_author_filter = st.multiselect("Filter by Author", options=authors, default=[])
+            advanced_policy_filter = st.multiselect("Filter by Policy Area", options=policy_areas, default=[])
+            advanced_enactment_filter = st.multiselect("Filter by Enactment Method", options=methods, default=[])
+            advanced_date_range = st.slider(
+                "Select Date Range",
+                min_value=min_date,
+                max_value=max_date,
+                value=(min_date, max_date)
+            )
 
-        # Chart styling control
-        text_size = st.slider("Text Size in Chart", min_value=10, max_value=30, value=12, step=1)
-        annotate_advanced = st.checkbox("Show Titles (Clickable) Above Each Orb?", value=True)
+            adv_data = data[
+                ((data["Author"].isin(advanced_author_filter)) | (len(advanced_author_filter) == 0)) &
+                ((data["Policy Area"].isin(advanced_policy_filter)) | (len(advanced_policy_filter) == 0)) &
+                ((data["Enactment Method"].isin(advanced_enactment_filter)) | (len(advanced_enactment_filter) == 0)) &
+                (data["Date"] >= pd.to_datetime(advanced_date_range[0])) &
+                (data["Date"] <= pd.to_datetime(advanced_date_range[1]))
+            ]
 
-        # Create advanced filtered data
-        advanced_filtered_data = data[
-            ((data["Author"].isin(advanced_author_filter)) | (len(advanced_author_filter) == 0)) &
-            ((data["Policy Area"].isin(advanced_policy_filter)) | (len(advanced_policy_filter) == 0)) &
-            ((data["Enactment Method"].isin(advanced_enactment_filter)) | (len(advanced_enactment_filter) == 0)) &
-            (data["Date"] >= pd.to_datetime(advanced_date_range[0])) &
-            (data["Date"] <= pd.to_datetime(advanced_date_range[1]))
-        ]
-
-        # Display advanced filter results
         st.subheader("Advanced Filtered Results")
-        display_results_table(advanced_filtered_data)
+        display_results_table(adv_data)
 
-        # Let user choose columns for advanced scatter
         axis_options = ["Policy Area", "Date", "Author", "Enactment Method"]
         x_axis = st.selectbox("X-Axis", axis_options, index=0)
         y_axis = st.selectbox("Y-Axis", axis_options, index=1)
         color_col = st.selectbox("Color By", axis_options, index=2)
 
-        # Generate advanced scatter plot
-        if not advanced_filtered_data.empty:
+        text_size = st.slider("Text Size in Chart", min_value=10, max_value=30, value=12, step=1)
+        annotate_advanced = st.checkbox("Show Titles (Clickable) Above Each Orb?", value=True)
+
+        if not adv_data.empty:
             fig_advanced = generate_scatter_plot(
-                data=advanced_filtered_data,
+                data=adv_data,
                 x_col=x_axis,
                 y_col=y_axis,
                 color_col=color_col,
@@ -556,25 +589,23 @@ def main():
             )
             st.plotly_chart(fig_advanced, use_container_width=True)
         else:
-            st.info("No data to visualize in Advanced Mode. Please update the filters.")
+            st.info("No data to visualize in Advanced Mode. Please adjust filters or load all bills.")
 
-    # 8. Additional “Super-Cool” Visuals
-
+    # -- SANKEY DIAGRAM --
     with st.expander("Sankey Diagram (Author → Policy Area → Method)"):
         if not filtered_data.empty:
             fig_sankey = create_sankey_diagram(filtered_data)
             st.plotly_chart(fig_sankey, use_container_width=True)
         else:
-            st.info("No data to display for Sankey. Adjust your filters above.")
+            st.info("No data to display for Sankey. Adjust your filters or load all bills.")
 
+    # -- TIMELINE VIEW --
     with st.expander("Timeline View"):
         if not filtered_data.empty:
             fig_timeline = create_timeline_plot(filtered_data)
             st.plotly_chart(fig_timeline, use_container_width=True)
         else:
-            st.info("No data to display in Timeline. Please adjust your filters.")
-
-    # Optional: after everything, show a little flourish
+            st.info("No data to display in Timeline. Please adjust filters or load all bills.")
 
 # ==========================================
 #     RUN THE APP
