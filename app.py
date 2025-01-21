@@ -12,7 +12,7 @@ FILE_NAME = "VCR - All Enacted Law & Legislative Tracker.xlsx"
 SHEET_NAME = "Enacted Federal Law (Ex. J.Res."
 
 # -----------------------------
-#        DATA LOADING
+#       DATA LOADING
 # -----------------------------
 @st.cache_data
 def load_data() -> pd.DataFrame:
@@ -45,20 +45,16 @@ def load_data() -> pd.DataFrame:
     workbook = load_workbook(FILE_NAME)
     sheet = workbook[SHEET_NAME]
     links = []
-    for row in sheet.iter_rows(
-        min_row=2, max_row=sheet.max_row, min_col=4, max_col=4
-    ):
+    for row in sheet.iter_rows(min_row=2, max_row=sheet.max_row, min_col=4, max_col=4):
         cell = row[0]
         links.append(cell.hyperlink.target if cell.hyperlink else None)
 
     df["Link"] = links
 
     # Extract plain text for "Title" by removing embedded URLs from the string
-    # (assuming the URLs always start with http and continue until next space)
     df["Title"] = df["Title and Link"].str.replace(r"http[^\s]+", "", regex=True).str.strip()
 
     # Explode authors by comma to facilitate filtering
-    # e.g., "Sen. A, Sen. B" -> two rows
     df = df.assign(Author=df["Authors"].str.split(",")).explode("Author")
     df["Author"] = df["Author"].str.strip()  # remove whitespace
 
@@ -86,9 +82,11 @@ def generate_scatter_plot(
     color_col: str,
     title: str,
     text_size: int = 12,
+    annotate_points: bool = True,
 ) -> px.scatter:
     """
-    Generates a scatter plot with hover info and consistent styling.
+    Generates a scatter plot with hover info, an optional clickable annotation 
+    for each data point, and consistent styling.
     """
     fig = px.scatter(
         data,
@@ -115,6 +113,33 @@ def generate_scatter_plot(
         font=dict(size=text_size),
         margin=dict(l=40, r=40, t=80, b=40),
     )
+
+    # Optionally add clickable annotations that appear near each orb
+    # so users can open the associated URL in a new browser tab.
+    if annotate_points:
+        # We'll add a small offset so text sits just above the orb
+        for i, row in data.iterrows():
+            link = row.get("Link", None)
+            x_val = row[x_col]
+            y_val = row[y_col]
+            title_text = row["Title"] or ""
+
+            if pd.notna(link):
+                annotation_text = f'<a href="{link}" target="_blank">{title_text}</a>'
+            else:
+                annotation_text = title_text  # no link if missing
+
+            # Add the annotation if there's something to show
+            if annotation_text.strip():
+                fig.add_annotation(
+                    x=x_val,
+                    y=y_val,
+                    text=annotation_text,
+                    showarrow=False,
+                    yshift=10,  # shift text upward so it appears above the orb
+                    font=dict(size=text_size - 2, color="blue"),
+                )
+
     return fig
 
 
@@ -125,8 +150,6 @@ def display_results_table(df: pd.DataFrame):
     count = len(df)
     st.write(f"**Total matching records:** {count}")
     if count > 0:
-        # We can show a simplified version of the data table, dropping
-        # columns we don’t want repeated. Or you can keep them all.
         columns_to_show = [
             "Author",
             "Date",
@@ -156,11 +179,13 @@ def main():
     # 2. Introduction / Instructions
     st.markdown("""
     Welcome to the **Enacted Federal Legislation Tracker**! 
-
+    
     - **Filter** records by *Author*, *Method of Enactment*, *Policy Area*, or *Date Range*.
     - **View** matching records in a table format.
-    - **Visualize** data in an interactive scatter plot.
-    - For **advanced visualization** options, click the **'Show Advanced Filters'** expander below.
+    - **Visualize** data in an interactive scatter plot where each orb 
+      (optionally) shows a clickable link above it, opening the bill reference in a new tab.
+    - For **advanced visualization** options, click the **'Show Advanced Filters and Visualization'** expander below.
+    
     ---
     """)
 
@@ -201,8 +226,6 @@ def main():
         )
 
     # Filter data
-    # If a particular filter list is empty, we include all possibilities
-    # If date_range is default, it includes entire range
     filtered_data = data[
         ((data["Author"].isin(author_filter)) | (len(author_filter) == 0)) &
         ((data["Policy Area"].isin(policy_filter)) | (len(policy_filter) == 0)) &
@@ -215,15 +238,17 @@ def main():
     st.subheader("Filtered Results")
     display_results_table(filtered_data)
 
-    # 5. Basic Scatter Plot
+    # 5. Basic Scatter Plot (with clickable annotations)
     if not filtered_data.empty:
+        st.subheader("Basic Visualization")
         fig = generate_scatter_plot(
             data=filtered_data,
             x_col="Policy Area",
             y_col="Date",
             color_col="Author",
-            title="Basic Visualization: Policy Area vs. Date (Colored by Author)",
+            title="Policy Area vs. Date (Colored by Author)",
             text_size=12,
+            annotate_points=True  # show clickable annotation
         )
         st.plotly_chart(fig, use_container_width=True)
     else:
@@ -253,9 +278,9 @@ def main():
     with st.expander("Show Advanced Filters and Visualization", expanded=False):
         st.markdown("""
         **Advanced Mode** allows you to:
-        - Apply multiple filters simultaneously.
+        - Apply more complex filters simultaneously (e.g., multiple authors, multiple policy areas, etc.).
         - Customize axes and color variables in the scatter plot.
-        - Adjust font sizes.
+        - Adjust font sizes for better readability.
         """)
 
         # Advanced Filters
@@ -283,6 +308,7 @@ def main():
 
         # Additional styling control
         text_size = st.slider("Text Size in Chart", min_value=10, max_value=30, value=12, step=1)
+        annotate_advanced = st.checkbox("Show Titles (Clickable) Above Each Orb?", value=True)
 
         # Create advanced filtered data
         advanced_filtered_data = data[
@@ -312,6 +338,7 @@ def main():
                 color_col=color_col,
                 title="Advanced Visualization",
                 text_size=text_size,
+                annotate_points=annotate_advanced
             )
             st.plotly_chart(fig_advanced, use_container_width=True)
         else:
